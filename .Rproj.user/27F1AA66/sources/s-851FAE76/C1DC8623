@@ -1,0 +1,25 @@
+{
+    "id": "C1DC8623",
+    "path": "~/Scilifelab/Projects/HPA-visualization/scripts/cluster UMAP.R",
+    "project_path": "scripts/cluster UMAP.R",
+    "type": "r_source",
+    "hash": "0",
+    "contents": "",
+    "dirty": false,
+    "created": 1618500168329.0,
+    "source_on_save": false,
+    "relative_order": 1,
+    "properties": {
+        "tempName": "Untitled1",
+        "cursorPosition": "294,0",
+        "scrollLine": "263"
+    },
+    "folds": "",
+    "lastKnownWriteTime": 1618519071,
+    "encoding": "UTF-8",
+    "collab_server": "",
+    "source_window": "",
+    "last_content_update": 1618519071153,
+    "read_only": false,
+    "read_only_alternatives": []
+}
