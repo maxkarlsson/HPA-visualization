@@ -78,8 +78,9 @@ scale_data <-
     if(max_scale) {
       gene_max <- 
         apply(wide_data, 
-            MARGIN = 1,
-            max)
+              MARGIN = 1,
+              function(x)
+                max(x, na.rm = T))
       
       wide_data <-
         sweep(wide_data, MARGIN=1, gene_max, `/`)
@@ -108,6 +109,7 @@ get_pca_scores <-
            R2cum_lim = 0.8,
            use_sDev_PCselection = F) {
     suppressMessages(require(tidyverse))
+    suppressMessages(require(pcaMethods))
     
     pc_lim <- ncol(pca_res@scores)
     
@@ -129,6 +131,7 @@ do_umap <-
            seed = 42, 
            n_neighbors = 15,
            n_components = 2, 
+           min_dist = 0.01,
            ...) {
     suppressMessages(require(tidyverse))
     suppressMessages(require(uwot))
@@ -139,9 +142,10 @@ do_umap <-
       umap(wide_data, 
            n_neighbors = n_neighbors,
            n_components = n_components,
+           min_dist = min_dist,
            ...) %>% 
       as.data.frame()
-      
+    
     rownames(umap_res) <- rownames(wide_data)
     colnames(umap_res) <- paste0("UMAP", 1:ncol(umap_res))
     
@@ -161,14 +165,47 @@ do_limma <-
     
   }
 
-cluster_wide_data <- 
+
+feature_umap_plot <- 
+  function(wide_data,
+           n_neighbors = 15,
+           min_dist = 0.01) {
+    
+    wide_data_scaled <- 
+      wide_data %>% 
+      t() %>% 
+      scale_data(zscore_scale = T) %>% 
+      t()
+    
+    umap_res <-
+      wide_data_scaled %>% 
+      do_umap(n_neighbors = n_neighbors,
+              min_dist = min_dist)
+    
+    
+    
+    umap_res %>% 
+      as_tibble(rownames = "row_id") %>% 
+      left_join(wide_data_scaled %>% 
+                  as_tibble(rownames = "row_id") %>% 
+                  gather(col, value, -row_id),
+                by = "row_id") %>% 
+      ggplot(aes(UMAP1, UMAP2, color = value)) +
+      geom_point() +
+      facet_wrap(~col) +
+      theme_bw() +
+      coord_fixed() +
+      scale_color_viridis_c()
+    
+  }
+
+get_clustering_order <- 
   function(wide_data,
            distance_method = "euclidean",
            clustering_method = "ward.D2", 
            cluster_rows = T,
            cluster_cols = T) {
     suppressMessages(require(tidyverse))
-    
     order_row <- 
       rownames(wide_data)
     order_col <- 
@@ -178,21 +215,40 @@ cluster_wide_data <-
     if(cluster_rows) {
       order_row <- 
         wide_data %>% 
-        dist(method = distance_method) %>% 
-        hclust(method = clustering_method) %>% 
-        with(labels[order])
+        do_cluster_rows(distance_method = distance_method,
+                        clustering_method = clustering_method) %>% 
+        get_clustering_labels()
     }
     
     if(cluster_cols) {
       order_col <- 
         wide_data %>% 
         t() %>% 
-        dist(method = distance_method) %>% 
-        hclust(method = clustering_method) %>% 
-        with(labels[order])
+        do_cluster_rows(distance_method = distance_method,
+                        clustering_method = clustering_method) %>% 
+        get_clustering_labels()
     }
     
-    wide_data[order_row, order_col] 
+    list(row = order_row, 
+         col = order_col)
+  }
+
+cluster_wide_data <- 
+  function(wide_data,
+           distance_method = "euclidean",
+           clustering_method = "ward.D2", 
+           cluster_rows = T,
+           cluster_cols = T) {
+    suppressMessages(require(tidyverse))
+    
+    clustering_order <- 
+      get_clustering_order(wide_data,
+                           distance_method = distance_method,
+                           clustering_method = clustering_method, 
+                           cluster_rows = cluster_rows,
+                           cluster_cols = cluster_cols)
+    
+    wide_data[clustering_order$row, clustering_order$col] 
     
   }
 
@@ -201,12 +257,14 @@ cluster_long_data <-
            distance_method = "euclidean",
            clustering_method = "ward.D2", 
            cluster_rows = T,
-           cluster_cols = T) {
+           cluster_cols = T, 
+           fill = NA) {
     suppressMessages(require(tidyverse))
     
     wide_data <- 
       long_data %>% 
-      spread(2, 3) %>% 
+      select(1:3) %>% 
+      spread(2, 3, fill = fill) %>% 
       column_to_rownames(names(long_data)[1])
     
     order_row <- 
@@ -233,13 +291,58 @@ cluster_long_data <-
     }
     
     long_data %>% 
-      select(v1 = 1, 
+      rename(v1 = 1, 
              v2 = 2,
              val = 3) %>% 
       mutate(v1 = factor(v1, order1),
              v2 = factor(v2, order2)) %>% 
       set_names(names(long_data))
     
+  }
+
+cluster_long_data_grouped <- 
+  function(long_data,
+           group_col = "ds2",
+           distance_method = "euclidean",
+           clustering_method = "ward.D2", 
+           cluster_rows = T,
+           cluster_cols = T) {
+    
+    clustering_order <- 
+      lapply(unique(long_data[[group_col]]),
+             function(group_) {
+               
+               long_data %>% 
+                 rename(group = group_col) %>% 
+                 filter(group == group_) %>% 
+                 select(1:3) %>% 
+                 spread(2, 3) %>% 
+                 column_to_rownames(names(long_data)[1]) %>% 
+                 get_clustering_order(distance_method = distance_method,
+                                      clustering_method = clustering_method, 
+                                      cluster_rows = cluster_rows,
+                                      cluster_cols = cluster_cols)
+             })
+    
+    clustering_order <- 
+      clustering_order %>% 
+      {list(row = map(., 
+                      . %>% 
+                        {.$row}),
+            col = map(., 
+                      . %>% 
+                        {.$col}))} %>% 
+      map(. %>% 
+            unlist() %>% 
+            unique()) 
+    
+    long_data %>% 
+      rename(v1 = 1, 
+             v2 = 2,
+             val = 3) %>% 
+      mutate(v1 = factor(v1, clustering_order$row),
+             v2 = factor(v2, clustering_order$col)) %>% 
+      set_names(names(long_data))
   }
 
 extract_variable_features <- 
@@ -751,11 +854,10 @@ circular_dendrogram_retinastyle_4 <-
 
 calculate_tau_score <- 
   function(wide_data) {
-    require(tidyverse)
     max_exp <- 
       apply(wide_data,
             MARGIN = 1,
-            max)
+            function(x) max(x, na.rm = T))
     
     N <- 
       apply(wide_data,
@@ -769,7 +871,7 @@ calculate_tau_score <-
             FUN = `/`) %>% 
       {1 - .} %>% 
       apply(MARGIN = 1,
-            sum)
+            function(x) sum(x, na.rm = T))
     
     
     tau_score <- 
@@ -778,22 +880,6 @@ calculate_tau_score <-
     
     tau_score
   }
-
-
-ramp_color_bias <- 
-  function(color1, color2, biases) {
-    require(tidyverse)
-    
-    colors_rgb <- 
-      colorRamp(c(color1, color2))(biases)
-    
-    
-    rgb(colors_rgb[,1],
-        colors_rgb[,2], 
-        colors_rgb[,3], 
-        maxColorValue = 255) 
-  }
-
 
 hpa_gene_classification <- 
   function(data, expression_col, tissue_col, gene_col, enr_fold, max_group_n, det_lim = 1) {
@@ -942,10 +1028,183 @@ perform_ORA <-
       }) %>% 
       ungroup() %>% 
       collect()
-        
+    
     
     rm(worker_cluster)
     
     outdata
   }
 
+
+multi_alluvial_plot <- 
+  function(data, vars, chunk_levels, pal, color_by = c(1, 3, 3)) {
+    
+    selvars = vars
+    
+    if(!is.null(names(vars))) {
+      vars = names(vars)
+    }
+    
+    alluv_1 <-
+      data %>%
+      ungroup() %>%
+      select(selvars) %>% 
+      ungroup() %>%
+      mutate(row_n = row_number()) %>%
+      gather(bar, chunk, -row_n) %>%
+      left_join(tibble(bar = vars, 
+                       color_vars = color_by), 
+                by = "bar") %>% 
+      group_by(row_n) %>%
+      mutate(chunk_color = chunk[match(vars[color_vars], bar)]) %>% 
+      ungroup() %>%
+      
+      mutate(chunk = factor(chunk, levels = chunk_levels),
+             bar = factor(bar, levels = vars)) %>%
+      
+      
+      ggplot(aes(x = bar, stratum = chunk, alluvium = row_n,
+                 y = 1)) +
+      
+      geom_flow(aes(fill = chunk_color), 
+                show.legend = F) +
+      geom_stratum(aes(fill = chunk), 
+                   show.legend = F, color = NA) +
+      
+      scale_x_discrete(expand = c(.1, .1), position = "top") +
+      scale_fill_manual(values = pal) + 
+      
+      
+      theme(axis.text.x = element_text(size = 18, face = "bold"),
+            axis.text.y = element_blank(), 
+            axis.ticks = element_blank(), 
+            panel.background = element_blank(), 
+            axis.title = element_blank())
+    
+    
+    
+    
+    flow_data <-
+      ggplot_build(alluv_1)$data[[1]] %>%
+      as_tibble() %>%
+      {
+        if("side" %in% names(.)) {
+          .
+        } else{
+          mutate(.,
+                 side = case_when(flow == "from" ~ "start",
+                                  flow == "to" ~ "end"))
+        }}
+    
+    
+    stratum_data <- 
+      ggplot_build(alluv_1)$data[[2]]
+    
+    flow_data_labels <-
+      flow_data %>% 
+      as_tibble() %>% 
+      
+      select(x, stratum, group, side, ymin, ymax) %>% 
+      pivot_wider(names_from = side, values_from = c(x, stratum, ymin, ymax)) %>%
+      
+      mutate_at(c("x_end", "ymax_end", "ymin_end", "x_start", "ymax_start", "ymin_start"), as.numeric) %>% 
+      group_by(stratum_start, stratum_end, x_start, x_end) %>%
+      summarise(y_end = (min(ymin_end) + max(ymax_end)) / 2, 
+                y_start = (min(ymin_start) + max(ymax_start)) / 2, 
+                size = max(ymax_start) - min(ymin_start))
+    
+    alluv_1 <- 
+      alluv_1 +
+      geom_text(data = flow_data_labels,
+                aes(x = x_start + 1/6,
+                    y = y_start, 
+                    label = size), 
+                inherit.aes = F, 
+                size = 3, 
+                hjust = 0) +
+      geom_text(data = flow_data_labels,
+                aes(x = x_end - 1/6,
+                    y = y_end, 
+                    label = size), 
+                inherit.aes = F, 
+                size = 3, 
+                hjust = 1) +
+      
+      # Stratum label
+      
+      geom_text(data = stratum_data,
+                aes(x = x, 
+                    y = y,
+                    label = paste(stratum, 
+                                  ymax - ymin, sep = "\n")), 
+                size = 4, 
+                inherit.aes = F)
+    
+    
+    alluv_1
+  }
+
+
+
+# ------ Color functions -----
+
+ramp_color_bias <- 
+  function(color1, color2, biases) {
+    require(tidyverse)
+    
+    colors_rgb <- 
+      colorRamp(c(color1, color2))(biases)
+    
+    
+    rgb(colors_rgb[,1],
+        colors_rgb[,2], 
+        colors_rgb[,3], 
+        maxColorValue = 255) 
+  }
+
+ramp_pal_bias <- 
+  function(colors, biases) {
+  require(tidyverse)
+  
+  colors_rgb <- 
+    colorRamp(colors)(biases)
+  
+  
+  rgb(colors_rgb[,1],
+      colors_rgb[,2], 
+      colors_rgb[,3], 
+      maxColorValue = 255) 
+}
+
+
+lab_to_hex <- 
+  function(l, a, b) {
+    
+    rgb_code <- 
+      tibble(l, a, b) %>% 
+      convertColor(from='Lab', to='sRGB')
+    
+    rgb(red = rgb_code[,1],
+        green = rgb_code[,2], 
+        blue = rgb_code[,3],
+        maxColorValue = 1)
+  }
+
+mix_2_colors <- 
+  function(color1, color2, mix = 0) {
+    sapply(1:length(color1),
+           function(i) {
+             colorRamp(c(color1[i], color2[i]))(mix[i]) %>% 
+               rgb(maxColorValue = 255)
+           }) 
+  }
+
+place_in_color_space <- 
+  function(l = 70, a, b) {
+    
+    lab_to_hex(l = l,
+               a = scales::rescale(a, to = c(-100, 100)),
+               b = scales::rescale(b, to = c(-100, 100)))
+    
+  
+}
