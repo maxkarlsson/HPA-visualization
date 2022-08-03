@@ -358,7 +358,7 @@ extract_variable_features <-
         log1p(wide_data)
     }
     
-    # Calculate mean and standar deviation
+    # Calculate mean and standard deviation
     vardata <- 
       wide_data %>% 
       {tibble(var = rownames(wide_data), 
@@ -997,44 +997,59 @@ hpa_gene_classification <-
     
   }	
 
-
-perform_ORA <- 
-  function(gene_associations, 
+perform_ORA <-
+  function(gene_associations,
            database,
            universe,
-           n_clusters = 5) {
+           n_clusters = 5,
+           minGSSize = 10,
+           maxGSSize = Inf,
+           pvalueCutoff = 0.05,
+           qvalueCutoff = 0.2) {
     require(clusterProfiler)
     require(multidplyr)
     
+    if(n_clusters != 1) {
+      worker_cluster <- new_cluster(n = n_clusters)
+      cluster_library(worker_cluster, c("dplyr",
+                                        "tidyverse"))
+      cluster_copy(worker_cluster, c("enricher",
+                                     "universe",
+                                     "database",
+                                     "minGSSize",
+                                     "maxGSSize",
+                                     "pvalueCutoff",
+                                     "qvalueCutoff" ))
+      
+      pre_out <- 
+        gene_associations %>%
+        group_by(partition) %>%
+        partition(worker_cluster) 
+    } else {
+      pre_out <- 
+        gene_associations %>%
+        group_by(partition)
+    }
     
-    worker_cluster <- new_cluster(n = n_clusters)
-    cluster_library(worker_cluster, c("dplyr",
-                                      "tidyverse"))
-    cluster_copy(worker_cluster, c("enricher",
-                                   "universe"))
-    
-    outdata <- 
-      gene_associations %>% 
-      group_by(partition) %>% 
-      partition(worker_cluster) %>%
+    outdata <-
+      pre_out %>% 
       do({
         g_data <- .
-        
-        pull(g_data, gene) %>% 
-          enricher(maxGSSize = Inf, 
-                   universe = universe,
-                   TERM2GENE = database) %>% 
+        pull(g_data, gene) %>%
+          enricher(universe = universe,
+                   TERM2GENE = database, 
+                   minGSSize = minGSSize,
+                   maxGSSize = maxGSSize,
+                   pvalueCutoff = pvalueCutoff,
+                   qvalueCutoff = qvalueCutoff) %>%
           as_tibble()
-      }) %>% 
-      ungroup() %>% 
+      }) %>%
+      ungroup() %>%
       collect()
     
-    
-    rm(worker_cluster)
-    
+    if(n_clusters != 1) rm(worker_cluster)
     outdata
   }
-
 
 multi_alluvial_plot <- 
   function(data, vars, chunk_levels, pal, color_by = c(1, 3, 3)) {
@@ -1208,3 +1223,289 @@ place_in_color_space <-
     
   
 }
+
+spread_colors <- 
+  function(color, n, colorrange = 0.5) {
+    
+    if(n == 1) {
+      return(color)
+    } else {
+      colorRamp(c("white", color, "black"))(seq(0.5 - colorrange / 2,
+                                                0.5 + colorrange / 2, 
+                                                length.out = n)) %>% 
+        as_tibble() %$% 
+        rgb(V1, V2, V3, maxColorValue = 255) 
+      
+    }
+    
+  }
+
+# ------ Cluster hull functions -----
+
+get_density <- 
+  function(x, y, h = 0.5, n = 100, lims = c(range(x),
+                                            range(y))) {
+    g_density <- 
+      MASS::kde2d(x, y, h = h, n = n, 
+                  lims = lims) 
+    
+    
+    g_density$z %>%
+      as_tibble(rownames = "x") %>%
+      gather(y, z, -x) %>% 
+      mutate(y = gsub("V", "", y)) %>% 
+      mutate_at(vars(x,y), as.integer) %>%
+      left_join(enframe(g_density$x, "x", "x_coord"),
+                by = "x") %>% 
+      left_join(enframe(g_density$y, "y", "y_coord"),
+                by = "y")
+  }
+
+
+generate_cluster_hulls <- 
+  function(V1,
+           V2, 
+           element_id,
+           cluster_membership, 
+           n = 300,
+           cum_z_lim = 0.95,
+           frac_lim = 0.05,
+           plot_range = rep(c(min(c(V1, V2)),
+                              max(c(V1, V2))),
+                            2) * 1.05,
+           poly_concavity = 1,
+           poly_smoothing = 1,
+           relative_bandwidth = 1/200) {
+    require(tidyverse)
+    require(magrittr)
+    require(sf)
+    require(sp)
+    require(concaveman)
+    
+    # Compile indata
+    cluster_data <- 
+      tibble(V1, V2, 
+             element_id,
+             cluster = cluster_membership)
+    
+    # Calculate plot range
+    plot_range_tb <- 
+      set_names(plot_range,
+                c("xmin", 
+                  "xmax",
+                  "ymin", 
+                  "ymax")) %>% 
+      enframe() %>% 
+      spread(name, value)
+    
+    # Calculate diagonal length
+    plot_diagonal <- 
+      sqrt((plot_range_tb$xmax - plot_range_tb$xmin)^2 + 
+             (plot_range_tb$ymax - plot_range_tb$ymin)^2)
+    
+    # Set bandwidth to fraction of diagonal
+    plot_bandwidth <- 
+      relative_bandwidth * plot_diagonal
+    
+    # Find subclusters
+    subclusters <-
+      cluster_data %>%
+      group_by(cluster) %>%
+      mutate(n_cluster_genes = n_distinct(element_id), 
+             sub_cluster = data.frame(V1, V2) %>%
+               fpc::dbscan(eps = plot_bandwidth) %$%
+               cluster) %>%
+      ungroup() %>% 
+      group_by(cluster, sub_cluster) %>%
+      mutate(n_sub_genes = n_distinct(element_id)) %>% 
+      ungroup() 
+    
+    # Classify subclusters
+    subclusters_classes <- 
+      subclusters %>% 
+      select(cluster, sub_cluster, n_cluster_genes, n_sub_genes) %>% 
+      distinct() %>% 
+      group_by(cluster) %>%
+      mutate(n_sub_genes = ifelse(sub_cluster == 0, 
+                                  0, 
+                                  n_sub_genes),
+             sub_type = case_when(sub_cluster == 0 ~ "outlier",
+                                  n_sub_genes / n_cluster_genes < frac_lim ~ "outlier",
+                                  rank(-n_sub_genes, 
+                                       ties.method = "first") == 1 ~ "primary",
+                                  T ~ "secondary")) %>% 
+      select(cluster, sub_cluster, sub_type)
+    
+    subclusters_classed <- 
+      subclusters %>% 
+      left_join(subclusters_classes,
+                by = c("cluster", "sub_cluster"))
+    
+    
+    # Calculate plot density
+    plot_density <- 
+      subclusters_classed %>% 
+      filter(sub_type != "outlier") %>%
+      group_by(cluster, sub_cluster, sub_type) %>%
+      do({
+        get_density(.$V1, 
+                    .$V2, 
+                    h = plot_bandwidth, 
+                    n = n, 
+                    lims = plot_range) 
+        
+      }) %>% 
+      ungroup() %>% 
+      filter(z > 1e-200) %>% 
+      group_by(cluster, sub_cluster) %>% 
+      mutate(z = z / sum(z)) %>% 
+      arrange(cluster, sub_cluster, -z) %>% 
+      mutate(cum_z = cumsum(z)) %>% 
+      ungroup()
+    
+    
+    # Filter pixels such that 95% of density is included
+    # Each point is then assigned to the cluster with highest density
+    plot_density_filtered <- 
+      plot_density %>% 
+      filter(cum_z < cum_z_lim) %>%
+      group_by(x, y) %>% 
+      top_n(1, z) %>%
+      slice(1) %>% 
+      ungroup()
+    
+    
+    # Calculate size of landmass
+    plot_density_landmass <-
+      plot_density_filtered %>%
+      group_by(cluster, sub_cluster) %>%
+      mutate(landmass = data.frame(x_coord, y_coord) %>%
+               fpc::dbscan(eps = plot_bandwidth) %$%
+               cluster) %>%
+      group_by(cluster, sub_cluster, landmass) %>% 
+      mutate(n_landmass_points = length(x)) %>%  
+      ungroup() %>% 
+      group_by(cluster) %>%
+      mutate(n_total_points = length(x)) %>% 
+      ungroup() 
+    
+    # Classify landmasses
+    plot_density_landmass_classes <- 
+      plot_density_landmass %>% 
+      select(cluster, sub_cluster, landmass, n_landmass_points, n_total_points) %>% 
+      distinct() %>%
+      group_by(cluster, sub_cluster) %>%
+      
+      mutate(frac_landmass = n_landmass_points / n_total_points,
+             landmass_type = case_when(rank(-n_landmass_points, 
+                                            ties.method = "first") == 1 ~ "primary",
+                                       T ~ "secondary")) %>% 
+      ungroup() %>% 
+      select(cluster, sub_cluster, landmass, landmass_type, frac_landmass)
+    
+    plot_density_landmass_classed <- 
+      plot_density_landmass %>%
+      left_join(plot_density_landmass_classes,
+                by = c("cluster", 
+                       "sub_cluster",
+                       "landmass")) %>% 
+      arrange(cluster)
+    
+    plot_density_mainland_filtered <-
+      plot_density_landmass_classed %>% 
+      filter(frac_landmass > frac_lim) %>%
+      filter(cum_z < cum_z_lim) %>%
+      group_by(x, y) %>% 
+      top_n(1, z) %>%
+      slice(1) %>% 
+      ungroup()
+    
+    # Create polygons
+    # Poly smoothing: How small distances should be further detailed - 
+    # higher values --> less detailed
+    # poly concavity: How convex polygons should be - 
+    # higher values --> less detailed
+    
+    plot_data_hulls <- 
+      plot_density_mainland_filtered %>% 
+      
+      group_by(cluster, sub_cluster, landmass, sub_type) %>% 
+      do({
+        st_as_sf(., coords=c('x_coord','y_coord')) %>%
+          concaveman(concavity = poly_concavity, 
+                     length_threshold = plot_bandwidth * poly_smoothing) %$%
+          st_coordinates(polygons) %>% 
+          as_tibble()
+      }) %>% 
+      ungroup() %>% 
+      mutate(polygon_id = paste(cluster, sub_cluster, landmass, sep = "_"))
+    
+    
+    
+    # plot_data_hulls %>% 
+    #   filter(sub_type == "primary") %>% 
+    #   group_by(cluster) %>% 
+    #   do({
+    #     g_data <<- .
+    #     
+    #     g_data %>% 
+    #       select(X, Y) %>% 
+    #       # column_to_rownames("element_id") %>% 
+    #       dist() %>% 
+    #       as.matrix() %>% 
+    #       as_tibble() %>% 
+    #       colSums() %>% 
+    #       enframe("element_id", "sumdist") %>% 
+    #       arrange(sumdist) 
+    #       
+    #   })
+    
+    plot_density_center <- 
+      plot_density %>% 
+      filter(sub_type == "primary") %>% 
+      group_by(cluster) %>% 
+      top_n(1, z) %>% 
+      slice(1) %>% 
+      ungroup() %>% 
+      select(cluster, x = x_coord, y = y_coord)
+    
+    
+    
+    list(hulls = plot_data_hulls,
+         density = plot_density,
+         landmass_pixels = plot_density_mainland_filtered,
+         center_density = plot_density_center)
+  }
+
+
+
+# ------ Normalization -----
+
+calc_tmm_normfactors <- 
+  function (object, method = c("TMM", "quantile"), refColumn = NULL, 
+            logratioTrim = 0.3, sumTrim = 0.05, doWeighting = TRUE, 
+            Acutoff = -1e+10, quantile = 0.75) {
+    method <- match.arg(method)
+    if (is.matrix(object)) {
+      if (is.null(refColumn)) 
+        refColumn <- 1
+      data <- object
+      libsize <- colSums(data)
+    } else {
+      stop("calcNormFactors() only operates on 'matrix' objects")
+    }
+    
+    if(refColumn == "median") {
+      ref <- 
+        apply(data, MARGIN = 1, median)
+    } else {
+      ref <- data[, refColumn]
+    }
+    
+    f <- switch(method, TMM = apply(data, 2, NOISeq:::.calcFactorWeighted, 
+                                    ref = ref, logratioTrim = logratioTrim, 
+                                    sumTrim = sumTrim, doWeighting = doWeighting, Acutoff = Acutoff), 
+                quantile = NOISeq:::.calcFactorQuantile(data, libsize, q = quantile))
+    f <- f/exp(mean(log(f)))
+    return(f)
+  }
