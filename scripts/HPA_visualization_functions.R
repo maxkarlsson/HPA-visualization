@@ -1,4 +1,5 @@
 
+# ------ Data manipulation -----
 
 convert_to_widedata <- 
   function(dat, xcol, ycol, valcol) {
@@ -54,11 +55,14 @@ remove_genes <-
     wide_dat
   }
 
+
+
 scale_data <- 
   function(wide_data, 
            logp1_scale = F,
            zscore_scale = F, 
-           max_scale = F) {
+           max_scale = F,
+           sum_scale = F) {
     suppressMessages(require(tidyverse))
     
     if(zscore_scale & max_scale) stop("Scaling: Choose either max scaling or z-score scaling")
@@ -86,11 +90,124 @@ scale_data <-
         sweep(wide_data, MARGIN=1, gene_max, `/`)
     }
     
+    if(sum_scale) {
+      gene_sum <- 
+        apply(wide_data, 
+              MARGIN = 1,
+              function(x)
+                sum(x, na.rm = T))
+      
+      wide_data <-
+        sweep(wide_data, MARGIN=1, gene_sum, `/`)
+    }
+    
     wide_data
   }
 
+extract_variable_features <- 
+  function(wide_data, 
+           log1p_data = F,
+           maxvars = 5000,
+           ...) {
+    
+    # Whether to log scale data for variable extraction or not. 
+    # This does not affect output data
+    if(log1p_data) {
+      wide_data <- 
+        log1p(wide_data)
+    }
+    
+    # Calculate mean and standard deviation
+    vardata <- 
+      wide_data %>% 
+      {tibble(var = rownames(wide_data), 
+              mean = apply(., 
+                           MARGIN = 1, 
+                           mean),
+              sd = apply(., 
+                         MARGIN = 1, 
+                         sd))}
+    
+    # Make loess model
+    vardata_loess <- 
+      loess(sqrt(sd) ~ mean, data = vardata,
+            ...)
+    
+    vardata_res <- 
+      vardata %>%
+      mutate(pred_sd = predict(vardata_loess, newdata = .),
+             high = sqrt(sd) > pred_sd,
+             diff = sqrt(sd) - pred_sd,
+             top = rank(-diff) < maxvars) 
+    
+    # vardata_res %T>%
+    #   {group_by(., high) %>%
+    #       count %>%
+    #       print} %>%
+    #   mutate(diff = sqrt(sd) - pred_sd,
+    #          top = rank(-diff) < maxvars) %>% 
+    #   ggplot(aes(mean, sqrt(sd), color  = top)) +
+    #   geom_point() +
+    #   stat_function(fun = function(x) predict(vardata_loess, newdata = tibble(mean = x)),
+    #                 color = "black")
+    
+    highvar_vars <- 
+      vardata_res %>% 
+      filter(top) %>% 
+      pull(var)
+    
+    wide_data[highvar_vars,]
+    
+  }
+
+# ------ Network functions -----
+
+calc_snn <- function(wide_data = NULL, long_data = NULL) {
+  
+  if((is.null(wide_data) & is.null(long_data)) |
+     (!is.null(wide_data) & !is.null(long_data))) {
+    stop("Supply either long or wide data")
+  }
+  
+  if(!is.null(wide_data)) {
+    
+    snn <- 
+      wide_data %>% 
+      dist(method = "binary") %>% 
+      as.matrix() %>% 
+      {1 - .} %>% 
+      as_tibble(rownames = "var1") %>% 
+      gather(var2, snn, -1)
+    
+    
+  } else if (!is.null(long_data)) {
+    nn_searchspace <- 
+      long_data %>% 
+      select(temp1 = 1,
+             temp2 = 2) %>% 
+      mutate(order = temp1 < temp2,
+             var1 = ifelse(order,
+                           temp1,
+                           temp2),
+             var2 = ifelse(order,
+                           temp2,
+                           temp1)) %>% 
+      select(var1, var2) %>% 
+      distinct()
+    
+    stop("Long data is not supported yet.")
+    
+    }
+  
+  snn
+  
+}
+
+# ------ Dimensionality reduction functions -----
+
+
 do_pca <- 
-  function(wide_data, npcs = NULL) {
+  function(wide_data, npcs = NULL, ...) {
     suppressMessages(require(tidyverse))
     suppressMessages(require(pcaMethods))
     
@@ -100,7 +217,7 @@ do_pca <-
     
     wide_data %>% 
       t() %>% 
-      pca(nPcs = npcs) 
+      pca(nPcs = npcs, ...) 
   }
 
 get_pca_scores <- 
@@ -131,7 +248,10 @@ do_umap <-
            seed = 42, 
            n_neighbors = 15,
            n_components = 2, 
+           metric = "euclidean",
            min_dist = 0.01,
+           clean_names = T,
+           ret_nn = F,
            ...) {
     suppressMessages(require(tidyverse))
     suppressMessages(require(uwot))
@@ -143,28 +263,34 @@ do_umap <-
            n_neighbors = n_neighbors,
            n_components = n_components,
            min_dist = min_dist,
+           ret_nn = ret_nn,
            ...) %>% 
       as.data.frame()
     
-    rownames(umap_res) <- rownames(wide_data)
-    colnames(umap_res) <- paste0("UMAP", 1:ncol(umap_res))
+    if(ret_nn) {
+      umap_res <-
+        list(embedding = umap_res[,1:n_components],
+             nn_idx = umap_res[,which(str_detect(colnames(umap_res), "\\.idx"))],
+             nn_dist = umap_res[,which(str_detect(colnames(umap_res), "\\.dist"))],
+             dist_metric = metric)
+    }
+    
+    if(clean_names) {
+      if(ret_nn) {
+        
+        colnames(umap_res$embedding) <- paste0("UMAP", 1:ncol(umap_res$embedding))
+        
+        colnames(umap_res$nn_idx) <- paste0("nn", 1:ncol(umap_res$nn_idx))
+        
+        colnames(umap_res$nn_dist) <- paste0("nn", 1:ncol(umap_res$nn_dist))
+        
+      } else {
+        colnames(umap_res) <- paste0("UMAP", 1:ncol(umap_res))
+      } 
+    }
     
     umap_res
   }
-
-do_limma <- 
-  function(wide_data, 
-           batch = NULL, 
-           design = matrix(1,ncol(wide_data),1)) {
-    
-    require(limma)
-    wide_data %>% 
-      removeBatchEffect(batch = batch,
-                        design = design,
-                        method = 'ls') 
-    
-  }
-
 
 feature_umap_plot <- 
   function(wide_data,
@@ -198,6 +324,115 @@ feature_umap_plot <-
       scale_color_viridis_c()
     
   }
+
+
+
+HPA_sample_UMAP <- 
+  function(wide_data) {
+    wide_data %>% 
+      # Remove genes that have max expression < 1 in dataset, 
+      # and genes without variance in expression:
+      remove_genes(rm_NA_genes = T,
+                   rm_not_expressed = T, 
+                   not_expressed_lim = 1,
+                   rm_no_variance = T) %>% 
+      
+      # Extract highly variable variables: 
+      # extract_variable_features(log1p_data = T) %>%
+      
+      # Scale data genewise, first log10(exp + 1), 
+      # and then z-score:
+      scale_data(logp1_scale = T, 
+                 zscore_scale = T) %>% 
+      
+      # Perform PCA:
+      do_pca() %>% 
+      
+      # Get PCA scores, selecting PCs that constitute 80% cumulative r2:
+      get_pca_scores(use_R2cum_PCselection = T,
+                     R2cum_lim = 0.8) %>% 
+      
+      # Perform UMAP with default settings:
+      do_umap(n_neighbors = round(sqrt(dim(.)[1]))) %>% 
+      
+      # Add rownames as a column for saving:
+      as_tibble(rownames = "sample")
+  }
+
+clusterbundle <- 
+  function(x1, y1, x2, y2, 
+           dist_method = "euclidean", 
+           clustering_method = "average", 
+           k = 15) {
+    
+    nodes <- 
+      tibble(x = c(x1, x2),
+             y = c(y1, y2)) %>% 
+      distinct() %>% 
+      mutate(node = as.character(row_number()))
+    
+    nodes_clust <- 
+      nodes %>% 
+      column_to_rownames("node") %>% 
+      dist(method = dist_method) %>% 
+      hclust(method = clustering_method) %>% 
+      cutree(k = k) %>% 
+      enframe("node", "cluster") %>% 
+      mutate(cluster = as.character(cluster))
+    
+    nodes %>% 
+      left_join(nodes_clust,
+                by = "node") %>% 
+      ggplot(aes(x, y, color = cluster, fill = cluster)) +
+      geom_encircle(show.legend = F,
+                    alpha = 0.2, 
+                    expand = 0) +
+      geom_point(show.legend = F)
+    
+    edges <- 
+      tibble(x1, y1, 
+             x2, y2) %>% 
+      left_join(nodes, 
+                by = c("x1" = "x",
+                       "y1" = "y")) %>% 
+      left_join(nodes, 
+                by = c("x2" = "x",
+                       "y2" = "y"),
+                suffix = c("1", "2")) %>% 
+      left_join(nodes_clust,
+                by = c("node1" = "node")) %>% 
+      left_join(nodes_clust,
+                by = c("node2" = "node"),
+                suffix = c("1", "2"))
+    
+    edges %>% 
+      filter(cluster1 != cluster2) %>% 
+      group_by(cluster1, cluster2) %>% 
+      summarise(x1 = mean(x1),
+                y1 = mean(y1),
+                x2 = mean(x2),
+                y2 = mean(y2),
+                n = length(node1), 
+                .groups = "drop") 
+  }
+
+# ------ Batch effect functions -----
+
+do_limma <- 
+  function(wide_data, 
+           batch = NULL, 
+           design = matrix(1,ncol(wide_data),1)) {
+    
+    require(limma)
+    wide_data %>% 
+      removeBatchEffect(batch = batch,
+                        design = design,
+                        method = 'ls') 
+    
+  }
+
+
+# ------ Clustering functions -----
 
 get_clustering_order <- 
   function(wide_data,
@@ -345,61 +580,7 @@ cluster_long_data_grouped <-
       set_names(names(long_data))
   }
 
-extract_variable_features <- 
-  function(wide_data, 
-           log1p_data = F,
-           maxvars = 5000,
-           ...) {
-    
-    # Whether to log scale data for variable extraction or not. 
-    # This does not affect output data
-    if(log1p_data) {
-      wide_data <- 
-        log1p(wide_data)
-    }
-    
-    # Calculate mean and standard deviation
-    vardata <- 
-      wide_data %>% 
-      {tibble(var = rownames(wide_data), 
-              mean = apply(., 
-                           MARGIN = 1, 
-                           mean),
-              sd = apply(., 
-                         MARGIN = 1, 
-                         sd))}
-    
-    # Make loess model
-    vardata_loess <- 
-      loess(sqrt(sd) ~ mean, data = vardata,
-            ...)
-    
-    vardata_res <- 
-      vardata %>%
-      mutate(pred_sd = predict(vardata_loess, newdata = .),
-             high = sqrt(sd) > pred_sd,
-             diff = sqrt(sd) - pred_sd,
-             top = rank(-diff) < maxvars) 
-    
-    # vardata_res %T>%
-    #   {group_by(., high) %>%
-    #       count %>%
-    #       print} %>%
-    #   mutate(diff = sqrt(sd) - pred_sd,
-    #          top = rank(-diff) < maxvars) %>% 
-    #   ggplot(aes(mean, sqrt(sd), color  = top)) +
-    #   geom_point() +
-    #   stat_function(fun = function(x) predict(vardata_loess, newdata = tibble(mean = x)),
-    #                 color = "black")
-    
-    highvar_vars <- 
-      vardata_res %>% 
-      filter(top) %>% 
-      pull(var)
-    
-    wide_data[highvar_vars,]
-    
-  }
+
 
 
 do_cluster_rows <- 
@@ -446,38 +627,8 @@ get_dendrogram_data <-
   }
 
 
-HPA_sample_UMAP <- 
-  function(wide_data) {
-    wide_data %>% 
-      # Remove genes that have max expression < 1 in dataset, 
-      # and genes without variance in expression:
-      remove_genes(rm_NA_genes = T,
-                   rm_not_expressed = T, 
-                   not_expressed_lim = 1,
-                   rm_no_variance = T) %>% 
-      
-      # Extract highly variable variables: 
-      # extract_variable_features(log1p_data = T) %>%
-      
-      # Scale data genewise, first log10(exp + 1), 
-      # and then z-score:
-      scale_data(logp1_scale = T, 
-                 zscore_scale = T) %>% 
-      
-      # Perform PCA:
-      do_pca() %>% 
-      
-      # Get PCA scores, selecting PCs that constitute 80% cumulative r2:
-      get_pca_scores(use_R2cum_PCselection = T,
-                     R2cum_lim = 0.8) %>% 
-      
-      # Perform UMAP with default settings:
-      do_umap(n_neighbors = round(sqrt(dim(.)[1]))) %>% 
-      
-      # Add rownames as a column for saving:
-      as_tibble(rownames = "sample")
-  }
 
+# ------ Retinagram functions -----
 
 rotate_coords <- 
   function(x, y, rotate_angle, rotate_center = c(0, 0)) {
@@ -852,6 +1003,8 @@ circular_dendrogram_retinastyle_4 <-
     }
   }
 
+# ------ Specificity functions -----
+
 calculate_tau_score <- 
   function(wide_data) {
     max_exp <- 
@@ -997,6 +1150,7 @@ hpa_gene_classification <-
     
   }	
 
+# ------ Enrichment functions -----
 perform_ORA <-
   function(gene_associations,
            database,
@@ -1050,6 +1204,8 @@ perform_ORA <-
     if(n_clusters != 1) rm(worker_cluster)
     outdata
   }
+
+# ------ Alluvial functions -----
 
 multi_alluvial_plot <- 
   function(data, vars, chunk_levels, pal, color_by = c(1, 3, 3)) {
@@ -1179,17 +1335,17 @@ ramp_color_bias <-
 
 ramp_pal_bias <- 
   function(colors, biases) {
-  require(tidyverse)
-  
-  colors_rgb <- 
-    colorRamp(colors)(biases)
-  
-  
-  rgb(colors_rgb[,1],
-      colors_rgb[,2], 
-      colors_rgb[,3], 
-      maxColorValue = 255) 
-}
+    require(tidyverse)
+    
+    colors_rgb <- 
+      colorRamp(colors)(biases)
+    
+    
+    rgb(colors_rgb[,1],
+        colors_rgb[,2], 
+        colors_rgb[,3], 
+        maxColorValue = 255) 
+  }
 
 
 lab_to_hex <- 
@@ -1221,8 +1377,8 @@ place_in_color_space <-
                a = scales::rescale(a, to = c(-100, 100)),
                b = scales::rescale(b, to = c(-100, 100)))
     
-  
-}
+    
+  }
 
 spread_colors <- 
   function(color, n, colorrange = 0.5) {
