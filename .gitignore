@@ -6,3 +6,5 @@
 \.Rproj.user
 .Rproj.user
 /.Rproj.user
+*.tsv
+*.pdf

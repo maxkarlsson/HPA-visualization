@@ -262,6 +262,7 @@ do_umap <-
       umap(wide_data, 
            n_neighbors = n_neighbors,
            n_components = n_components,
+           metric = metric,
            min_dist = min_dist,
            ret_nn = ret_nn,
            ...) %>% 
@@ -631,7 +632,7 @@ get_dendrogram_data <-
 # ------ Retinagram functions -----
 
 rotate_coords <- 
-  function(x, y, rotate_angle, rotate_center = c(0, 0)) {
+  function(x, y, rotate_angle, rotate_center = c(0, 0), radius_just = 0) {
     
     # Center data
     rotdata <- 
@@ -652,6 +653,9 @@ rotate_coords <-
              angle = case_when(x == 0 & y == 0 ~ 0, 
                                quadrant %in% 1:2 ~ acos(x/hyp),
                                quadrant %in% 3:4 ~ 2 * pi - acos(x/hyp)) + rotate_angle,
+             
+             # Adjust hypotenuse
+             hyp = hyp + radius_just,
              
              # New coordinates
              x = cos(angle) * hyp,
@@ -720,6 +724,7 @@ shrink_rotation_coords <-
 
 calculate_retina_cut_angle <- 
   function(clust) {
+    require(ggraph)
     dendrogram <-
       clust %>%
       as.dendrogram()
@@ -795,6 +800,215 @@ calculate_coord_angle <-
       pull(angle)
   }
 
+circular_dendrogram_retinastyle <-
+  function(clust, color_pal, 
+           preserve_height = F,
+           scale_expansion = c(0.25, 0.25), 
+           text_size = 3, 
+           width_range = c(1.5, 6), 
+           arc_strength = 0.8, 
+           default_color = "gray80", 
+           rotate_angle = 0, 
+           shrink_angle = 0,
+           flip_text = F, 
+           text_vjust = 0.5,
+           text_hnudge = 0,
+           elbow = F) {
+    require(ggraph)
+    require(igraph)
+    require(viridis)
+    require(tidyverse)
+    require(magrittr)
+    
+    dendrogram <-
+      clust %>%
+      as.dendrogram()
+    
+    
+    if(preserve_height) {
+      g <-
+        ggraph(dendrogram, layout = 'dendrogram',
+               height = height, circular = T)
+    } else {
+      g <-
+        ggraph(dendrogram, layout = 'dendrogram',
+               circular = T)
+    }
+    
+    edge_data_temp <- 
+      get_edges()(g$data) %>%
+      as_tibble() %>% 
+      mutate(row_number = row_number())
+    
+    
+    edge_data_coords <- 
+      edge_data_temp %>% 
+      select(row_number, x, y, xend, yend) %>% 
+      gather(dim, value, -row_number) %>% 
+      mutate(dimtype = case_when(dim %in% c("xend", "yend") ~ "end",
+                                 T ~ "start"),
+             dim = gsub("end", "", dim)) %>% 
+      spread(dim, value) 
+    
+    
+    edge_data_coords_rotated <- 
+      rotate_coords(edge_data_coords$x,
+                    edge_data_coords$y, 
+                    rotate_angle = rotate_angle, 
+                    rotate_center = c(0, 0)) %>% 
+      bind_cols(edge_data_coords %>% 
+                  select(row_number, dimtype))
+    
+    edge_data_coords_shrunk <- 
+      shrink_rotation_coords(edge_data_coords_rotated$x,
+                             edge_data_coords_rotated$y, 
+                             shrink_angle = shrink_angle, 
+                             rotate_center = c(0, 0)) %>% 
+      bind_cols(edge_data_coords %>% 
+                  select(row_number, dimtype))
+    
+    edge_data_transformed <- 
+      edge_data_coords_shrunk %>% 
+      gather(dim, value, x, y) %>% 
+      mutate(dim = ifelse(dimtype == "end", 
+                          paste0(dim, dimtype), 
+                          dim)) %>% 
+      select(dim, row_number, value) %>% 
+      spread(dim, value)
+    
+    
+    
+    edge_data <- 
+      edge_data_temp %>% 
+      select(-x, -y, -xend, -yend) %>% 
+      left_join(edge_data_transformed,
+                by = "row_number") %>% 
+      left_join(color_pal %>%
+                  enframe("label", "color"),
+                by = c("node2.label" = "label")) %>%
+      mutate(radius = xend^2 + yend^2) %>%
+      arrange(-radius) %>% 
+      mutate(edge_id = as.character(row_number()),
+             rank_radius = unclass(factor(-radius))) 
+    
+    edge_id_colors <- 
+      edge_data %>% 
+      filter(!is.na(color)) %$%
+      set_names(color, edge_id)
+    
+    for(rank_rad in 2:max(edge_data$rank_radius)) {
+      edge_id_colors_new <- 
+        left_join(edge_data %>%
+                    select(edge_id, radius, xend, yend, rank_radius) %>%
+                    filter(rank_radius == rank_rad),
+                  edge_data %>%
+                    select(edge_id, radius, x, y, rank_radius) %>%
+                    filter(rank_radius < rank_rad),
+                  by = c("xend" = "x", "yend" = "y")) %>%
+        left_join(enframe(edge_id_colors),
+                  by = c("edge_id.y" = "name")) %>%
+        group_by(edge_id.x) %>% 
+        summarise(color = ifelse(n_distinct(value) == 1 & any(value != default_color), 
+                                 as.character(unique(value)),
+                                 default_color)) %$%
+        set_names(color, edge_id.x)
+      edge_id_colors <- 
+        c(edge_id_colors, edge_id_colors_new)
+    }
+    
+    
+    node_data_rotated <-
+      g$data %>% 
+      as_tibble() %$%
+      rotate_coords(x,
+                    y, 
+                    rotate_angle = rotate_angle,
+                    rotate_center = c(0, 0))  %>% 
+      
+      bind_cols(g$data %>% 
+                  select(-x, -y))
+    
+    node_data_shrunk <- 
+      node_data_rotated %$%
+      shrink_rotation_coords(x,
+                             y, 
+                             shrink_angle = shrink_angle, 
+                             rotate_center = c(0, 0)) %>% 
+      bind_cols(g$data %>% 
+                  select(-x, -y))
+    
+    node_data <- 
+      node_data_shrunk
+    
+    
+    text_degree <-
+      ifelse(flip_text,
+             180,
+             0)
+    
+    
+    label_data <-
+      node_data %>%
+      filter(label != "") %>%
+      bind_cols(rotate_coords(.$x,
+                              .$y,
+                              rotate_angle = 0,
+                              rotate_center = c(0, 0),
+                              radius_just = text_hnudge) %>% 
+                  set_colnames(paste(colnames(.), "adj", sep = "_"))) %>% 
+      
+      mutate(degree = case_when(x >= 0 ~ asin(y) * 180 / pi + text_degree,
+                                x < 0 ~ 360 - asin(y) * 180 / pi + text_degree)) %>%
+      left_join(color_pal %>%
+                  enframe("label", "color"),
+                by = "label") 
+    
+    
+    
+    g <- 
+      g +
+      scale_edge_width(range = width_range, limits = c(0, 1)) +
+      
+      
+      
+      scale_edge_color_manual(values = edge_id_colors)  +
+      label_data %>%
+      {geom_node_text(data = .,
+                      aes(x = x_adj,
+                          y = y_adj,
+                          label = label),
+                      angle = .$degree,
+                      hjust = case_when(.$x < 0 & !flip_text ~ 1,
+                                        .$x >= 0 & !flip_text ~ 0,
+                                        .$x < 0 & flip_text ~ 0,
+                                        .$x >= 0 & flip_text ~ 1),
+                      vjust = text_vjust,
+                      size = text_size)}  +
+      scale_x_continuous(expand = expansion(scale_expansion)) +
+      scale_y_continuous(expand = expansion(scale_expansion)) +
+      
+      coord_fixed() +
+      theme_void()
+    
+    if(elbow) {
+      g + 
+        geom_edge_elbow(data = edge_data,
+                        aes(edge_color = edge_id,
+                            edge_width = 1 - sqrt(xend^2 + yend^2)),
+                        show.legend = F, 
+                        lineend="round")
+    } else {
+      g +
+        geom_edge_diagonal(data = edge_data,
+                           aes(edge_color = edge_id,
+                               edge_width = 1 - sqrt(xend^2 + yend^2)),
+                           strength = arc_strength,
+                           show.legend = F, 
+                           lineend="round") 
+    }
+  }
+
+# Deprecated:
 circular_dendrogram_retinastyle_4 <-
   function(clust, color_mapping, label_col, color_col, 
            preserve_height = F,
