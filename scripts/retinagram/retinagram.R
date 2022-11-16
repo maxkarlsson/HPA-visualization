@@ -99,7 +99,7 @@ plot <-
                                     preserve_height = T,
                                     scale_expansion = c(0.5, 0.5), 
                                     text_size = 2.5, 
-                                    width_range = c(1, 1), 
+                                    width_range = c(0.5, 0.5), 
                                     arc_strength = 0, 
                                     default_color = "gray80", 
                                     rotate_angle = angle, 
