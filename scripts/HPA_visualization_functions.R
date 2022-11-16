@@ -947,6 +947,7 @@ circular_dendrogram_retinastyle <-
              0)
     
     
+    
     label_data <-
       node_data %>%
       filter(label != "") %>%
@@ -963,7 +964,9 @@ circular_dendrogram_retinastyle <-
                   enframe("label", "color"),
                 by = "label") 
     
-    
+    plot_lims <- 
+      range(node_data$x) %>% 
+      {. + sign(.) * diff(.) * scale_expansion}
     
     g <- 
       g +
@@ -984,8 +987,8 @@ circular_dendrogram_retinastyle <-
                                         .$x >= 0 & flip_text ~ 1),
                       vjust = text_vjust,
                       size = text_size)}  +
-      scale_x_continuous(expand = expansion(scale_expansion)) +
-      scale_y_continuous(expand = expansion(scale_expansion)) +
+      scale_x_continuous(limits = plot_lims) +
+      scale_y_continuous(limits = plot_lims) +
       
       coord_fixed() +
       theme_void()
