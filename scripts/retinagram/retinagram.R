@@ -33,9 +33,26 @@ sc_hclust <-
   as.dist() %>% 
   hclust(method = "ward.D2")
 
+# Calculate the two cut angles that doesn't interfere with edges
 plot_angle <- 
   sc_hclust %>% 
   calculate_retina_cut_angle()
+
+# Explanation to retinagram arguments: 
+# clust             hclust object
+# color_pal         named vector with hclust leaves as names and colors as values
+# preserve_height   boolean whether to preserve hclust node heights or scale them equidistant across the plot radius
+# scale_expansion   vector of length two with a factor to scale the plot axes with
+# text_size         leaf text size
+# width_range       vector of length two (or one) with the size range of edges
+# arc_strength      the strength of the edge curvature (usually between 0 and 1)
+# default_color     default color of edges
+# rotate_angle      the angle (in radians) to rotate the tree. If shrink angle is not 0, run calculate_retina_cut_angle() to find angles that don't break the plot
+# shrink_angle      the angle (in radians) to shrink the tree. 0 will generate a cirle, pi will generate a half circle, and so on
+# flip_text         whether to flip the upside down. Useful if you intend to rotate the tree
+# text_vjust        the vertical justification of the text
+# text_hnudge       a numeric value to nudge leaf text to give a small gap between leaf texts and tree 
+# elbow             boolean whether to plot elbows rather than curved edges
 
 
 plot <- 
