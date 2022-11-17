@@ -1,5 +1,5 @@
 
-
+setwd("scripts/retinagram/")
 library(tidyverse)
 
 # Source the HPA visualization library from github: maxkarlsson/HPA-visualization
@@ -74,10 +74,10 @@ plot <-
                                     elbow = F)
   })
 plot[[1]]
-ggsave("sc circular dendro angle 1 alt 1.pdf",
+ggsave("sc circular dendro angle 1 alt 1.svg",
        width = 8, height = 8)
 plot[[2]]
-ggsave("sc circular dendro angle 2 alt 1.pdf",
+ggsave("sc circular dendro angle 2 alt 1.svg",
        width = 8, height = 8)
 
 
@@ -100,10 +100,10 @@ plot <-
                                     elbow = F)
   })
 plot[[1]]
-ggsave("sc circular dendro angle 1 alt 2.pdf",
+ggsave("sc circular dendro angle 1 alt 2.svg",
        width = 8, height = 8)
 plot[[2]]
-ggsave("sc circular dendro angle 2 alt 2.pdf",
+ggsave("sc circular dendro angle 2 alt 2.svg",
        width = 8, height = 8)
 
 
@@ -127,8 +127,9 @@ plot <-
                                     elbow = T)
   })
 plot[[1]]
-ggsave("sc circular dendro angle 1 alt 3.pdf",
+ggsave("sc circular dendro angle 1 alt 3.svg",
        width = 8, height = 8)
 plot[[2]]
-ggsave("sc circular dendro angle 2 alt 3.pdf",
+ggsave("sc circular dendro angle 2 alt 3.svg",
        width = 8, height = 8)
+
