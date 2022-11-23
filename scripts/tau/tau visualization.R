@@ -61,6 +61,8 @@ tau <-
   tau_data %>% 
   calculate_tau_score()
 
+write_tsv(tau, "tau.tsv")
+
 # Prepare data for tau silhouette plotting
 tau_plot_data <- 
   tau_data %>% 
@@ -80,15 +82,8 @@ tau_plot_data <-
 
 
 # Make an svg per each gene
-# Parallelize across 5 workers
-worker_cluster <- new_cluster(n = 5)
-cluster_library(worker_cluster, c("tidyverse"))
-cluster_copy(worker_cluster, c("geom_stepribbon"))
-
-
 tau_plot_data %>% 
   group_by(gene) %>%
-  partition(gene) %>% 
   do({
     ggplot(., 
            aes(rank_scaled, ymin = value, y = value, ymax = Inf)) +
@@ -112,10 +107,4 @@ tau_plot_data %>%
            width = 1, height = 1, units = "cm")
     
     tibble()
-  }) %>% 
-  collect() %>% 
-  ungroup()
-
-# Clean up (probably not necessary)
-rm(worker_cluster)
-gc()
+  }) 
