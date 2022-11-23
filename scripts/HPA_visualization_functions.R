@@ -1426,7 +1426,7 @@ perform_ORA <-
 
 multi_alluvial_plot <- 
   function(data, vars, chunk_levels, pal, color_by = c(1, 3, 3)) {
-    
+    require(ggalluvial)
     selvars = vars
     
     if(!is.null(names(vars))) {
