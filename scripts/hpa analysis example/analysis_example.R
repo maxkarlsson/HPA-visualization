@@ -118,7 +118,7 @@ plot_umap %>%
   scale_color_manual(values = consensus_colors) +
   theme_bw()
 
-# ------ classification --------
+# ------ classification using IT's version--------
 
 plot_data <- 
   sc_class %>% 
@@ -268,6 +268,36 @@ edge_data <-
 # write_csv(node_data, "sc class net nodes.csv")
 # write_csv(edge_data, "sc class net edges.csv")
 
+
+
+
+# ------ classification by manual calculation version--------
+
+manual_class <- 
+  sc_consensus_data %>%
+  hpa_gene_classification(expression_col = "exp",
+                          tissue_col = "cell_type_name", 
+                          gene_col = "ensg_id",
+                          enr_fold = 4, 
+                          max_group_n = 10)
+  
+plot_data <- 
+  manual_class %>% 
+  group_by(spec_category) %>% 
+  count() %>% 
+  mutate(spec_category = factor(spec_category, spec_category_levels)) 
+
+plot_data %>% 
+  ggplot(aes(1, n, label = n, fill = spec_category)) + 
+  geom_col(show.legend = F) +
+  geom_textpath(position = position_stack(vjust = 0.5), 
+                hjust = 1,
+                aes(x = 1.5)) +
+  scale_fill_manual(values = gene_category_pal) +
+  scale_x_discrete(expand = expansion(c(0,1)))+
+  coord_polar("y") +
+  theme_void()
+
 # ------ tau --------
 
 detected_genes <- 
@@ -329,7 +359,92 @@ sc_class %>%
                       color_by = c(1, 1)) 
 
 
+
+# Here we compare IT's classification with the manually calculated one
+
+
+sc_class %>% 
+  select(1,2) %>% 
+  left_join(manual_class %>% 
+              select(1,2) %>% 
+              mutate(spec_category = str_to_sentence(spec_category)),
+            by = c("ensg_id" = "gene"), 
+            suffix = c("_1", "_2")) %>% 
+  multi_alluvial_plot(vars = c("IT" = "specificity_category", 
+                               "Manual" = "spec_category"), 
+                      chunk_levels = c('Tissue enriched', 'Group enriched', 
+                                       'Tissue enhanced', 'Low tissue specificity', 
+                                       'Not detected'), 
+                      pal = c(gene_category_pal), 
+                      color_by = c(1, 1)) +
+  ggtitle("The categories are exactly the same",
+          "If they weren't it would be very troubling")
+
+
 # ------ tmm normalization --------
+
+# Here we will perform tmm adjustment from ptpm data: 
+
+# Data input is a wide format matrix so let's create that format: 
+wide_data <- 
+  sc_cluster_data %>% 
+  select(ensg_id, assay_id, cluster_id, ptpm) %>% 
+  left_join(select(., assay_id, cluster_id) %>% 
+              distinct() %>% 
+              unite(id, assay_id, cluster_id, sep = ";", remove = F)) %>% 
+  select(ensg_id, id, ptpm) %>% 
+  spread(id, ptpm) %>% 
+  column_to_rownames("ensg_id") %>% 
+  as.matrix()
+
+# Calculate and apply sample wise tmm factors
+tmm_factors <- 
+  wide_data  %>% 
+  calc_tmm_normfactors(method = "TMM", 
+                       
+                       # Use median column as reference distribution:
+                       refColumn = "median",
+                       
+                       # Trim parameters:
+                       logratioTrim = 0.3, 
+                       sumTrim = 0.3, 
+                       
+                       # Weighting should be done only if count data:
+                       doWeighting = F) %>% 
+  enframe("sample", "tmm_factor")
+
+wide_data_tmm <- t(t(wide_data) / tmm_factors$tmm_factor)
+
+
+sc_cluster_data_2 <- 
+  wide_data_tmm %>% 
+  as_tibble(rownames = "ensg_id") %>% 
+  gather(id, ntpm, -1) %>% 
+  left_join(select(., id) %>% 
+              distinct() %>% 
+              separate(id, into = c("assay_id", "cluster_id"), sep = ";", remove = F))  %>% 
+  select(ensg_id, assay_id, cluster_id, ntpm)
+
+
+joined_data <- 
+  sc_cluster_data %>% 
+  mutate(assay_id = as.character(assay_id),
+         cluster_id = as.character(cluster_id)) %>% 
+  left_join(sc_cluster_data_2,
+            by = c("ensg_id", "assay_id", "cluster_id"),
+            suffix = c("_1", "_2"))
+            
+
+# We see the largest difference between IT's calculated nTPM and our manually calculated nTPM is virtually 0
+# That's really good!
+joined_data %>% 
+  mutate(diff = ntpm_1 - ntpm_2) %>% 
+  arrange(-abs(diff))
+  
+
+
+
+
 
 
          
